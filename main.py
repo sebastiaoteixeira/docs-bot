@@ -2,6 +2,7 @@ import os
 import subprocess
 import json
 from google import genai
+from google.genai import types
 from pathlib import Path
 
 def run_command(command):
@@ -11,6 +12,23 @@ def run_command(command):
         print(f"Command failed: {e.output}")
         raise
 
+def read_doc_file(path: str) -> str:
+    """Reads the content of a specific documentation file. 
+    Use this to inspect existing docs before proposing updates.
+    """
+    p = Path(path)
+    # Security check: don't allow reading outside docs/
+    if "docs" not in p.parts:
+        return "Error: Access denied. You can only read files within the 'docs/' directory."
+    
+    if not p.exists():
+        return f"Error: File '{path}' does not exist."
+        
+    try:
+        return p.read_text(encoding="utf-8")
+    except Exception as e:
+        return f"Error reading file: {str(e)}"
+
 def main():
     api_key = os.getenv("GEMINI_API_KEY")
     model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
@@ -19,52 +37,68 @@ def main():
         print("Error: GEMINI_API_KEY not set")
         return
 
-    # 1. Get the diff from the caller repository
+    # 1. Get the list of changed files and the tree
     try:
+        # Get the tree to give AI the 'map'
+        docs_tree = run_command("find docs -maxdepth 5 -not -path '*/.*'")
+        
+        # Get the diff to show what changed in code
         diff = run_command("git diff HEAD~1 HEAD -- 'src/**'")
         if not diff.strip():
-            print("No source code changes detected in 'src/'. Skipping docs update.")
+            print("No source code changes detected. Skipping docs update.")
             return
     except Exception as e:
-        print(f"Could not get git diff: {e}")
+        print(f"Could not get git context: {e}")
         return
 
-    # 2. Configure Modern Gemini Client
+    # 2. Configure Gemini with Tools
     client = genai.Client(api_key=api_key)
+    
+    # We provide the read_doc_file function as a tool
+    tools = [read_doc_file]
 
-    # 3. Prepare the Prompt
-    system_prompt = """
-    You are a specialized technical writer for the 'yaml-api-generator' framework.
-    This framework generates REST APIs (FastAPI/DRF) and Frontends (React) from YAML specs.
+    system_prompt = f"""
+    You are an expert Technical Writer Agent for the 'yaml-api-generator' framework.
+    
+    DOCS DIRECTORY STRUCTURE:
+    {docs_tree}
     
     TASK:
-    Analyze the provided 'git diff' of code changes and update the corresponding documentation in '/docs'.
+    Update the documentation to reflect the provided code changes.
     
-    GUIDELINES:
-    1. If a new CLI flag is added to 'cli.py', update CLI reference.
-    2. If a new YAML key is added to the parser/schema, update the Reference section.
-    3. If frontend logic changes, update the UI/Frontend documentation.
-    4. Maintain the existing tone, formatting, and Fumadocs structure.
+    AGENTIC WORKFLOW:
+    1. Review the Code Diff.
+    2. Identify which documentation files (from the STRUCTURE above) are affected.
+    3. Use the 'read_doc_file' tool to read those files so you can update them correctly.
+    4. Propose new files if the feature is entirely undocumented.
+    
+    CRITICAL INSTRUCTIONS:
+    - Maintain existing tone, style, and formatting (Fumadocs/Markdown).
+    - Suggest updates to 'meta.json' or index files if you add new pages.
+    - Return your final answer ONLY as a JSON object.
     
     RESPONSE FORMAT:
-    Return your response ONLY as a valid JSON object:
-    {
+    Return a valid JSON object:
+    {{
       "files": [
-        {"path": "docs/path/to/file.md", "content": "Full markdown content"}
+        {{"path": "docs/path/to/file.md", "content": "Full updated content"}}
       ],
-      "pr_title": "Short descriptive title (max 70 chars)",
-      "pr_body": "Markdown summary of documentation changes"
-    }
+      "pr_title": "Short descriptive title",
+      "pr_body": "Detailed summary of changes"
+    }}
     """
 
-    prompt = f"{system_prompt}\n\nGIT DIFF:\n{diff}"
-
-    # 4. Generate Content
+    # 3. Generate Content with Automatic Function Calling
     try:
-        print(f"Generating docs using model: {model_name}")
+        print(f"Agent starting analysis using {model_name}...")
         response = client.models.generate_content(
             model=model_name,
-            contents=prompt
+            contents=f"CODE DIFF:\n{diff}",
+            config=types.GenerateContentConfig(
+                system_instruction=system_prompt,
+                tools=tools,
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False)
+            )
         )
         
         content = response.text.strip()
@@ -75,22 +109,23 @@ def main():
         
         data = json.loads(content.strip())
     except Exception as e:
-        print(f"Error parsing AI response: {e}")
+        print(f"Agent failed to produce valid JSON: {e}")
+        print(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
         return
 
-    # 5. Apply changes to the filesystem
+    # 4. Apply changes
     for file_data in data.get("files", []):
         path = Path(file_data["path"])
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(file_data["content"])
-        print(f"Updated: {path}")
+        path.write_text(file_data["content"], encoding="utf-8")
+        print(f"Successfully processed: {path}")
 
-    # 6. Export PR info to GitHub Environment
+    # 5. Export for GitHub Actions
     if 'GITHUB_ENV' in os.environ:
         with open(os.environ['GITHUB_ENV'], 'a') as f:
             f.write(f"AI_PR_TITLE={data.get('pr_title', 'docs: automatic update')}\n")
             f.write("AI_PR_BODY<<EOF\n")
-            f.write(f"{data.get('pr_body', 'Updated documentation based on code changes.')}\n")
+            f.write(f"{data.get('pr_body', 'Documentation update triggered by code changes.')}\n")
             f.write("EOF\n")
 
 if __name__ == "__main__":
