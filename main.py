@@ -96,9 +96,8 @@ def main():
     # 3. Generate Content with Automatic Function Calling
     try:
         print(f"Agent starting analysis using {model_name}...")
-        response = client.models.generate_content(
+        chat = client.chats.create(
             model=model_name,
-            contents=f"CODE DIFF:\n{diff}",
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=tools,
@@ -107,6 +106,8 @@ def main():
                 ),
             ),
         )
+
+        response = chat.send_message(f"CODE DIFF:\n{diff}")
 
         raw_text = response.text
         if raw_text is None:
@@ -130,9 +131,7 @@ def main():
         data = json.loads(content.strip())
     except Exception as e:
         print(f"Agent failed to produce valid JSON: {e}")
-        print(
-            f"Raw response: {response.text if 'response' in locals() else 'No response'}"
-        )
+        print(f"Raw response: {raw_text if 'raw_text' in dir() else 'No response'}")
         return
 
     # 4. Apply changes
