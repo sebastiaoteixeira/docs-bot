@@ -5,34 +5,39 @@ from google import genai
 from google.genai import types
 from pathlib import Path
 
+
 def run_command(command):
     try:
-        return subprocess.check_output(command, shell=True, text=True, stderr=subprocess.STDOUT)
+        return subprocess.check_output(
+            command, shell=True, text=True, stderr=subprocess.STDOUT
+        )
     except subprocess.CalledProcessError as e:
         print(f"Command failed: {e.output}")
         raise
 
+
 def read_doc_file(path: str) -> str:
-    """Reads the content of a specific documentation file. 
+    """Reads the content of a specific documentation file.
     Use this to inspect existing docs before proposing updates.
     """
     p = Path(path)
     # Security check: don't allow reading outside docs/
     if "docs" not in p.parts:
         return "Error: Access denied. You can only read files within the 'docs/' directory."
-    
+
     if not p.exists():
         return f"Error: File '{path}' does not exist."
-        
+
     try:
         return p.read_text(encoding="utf-8")
     except Exception as e:
         return f"Error reading file: {str(e)}"
 
+
 def main():
     api_key = os.getenv("GEMINI_API_KEY")
     model_name = os.getenv("GEMINI_MODEL", "gemini-1.5-pro")
-    
+
     if not api_key:
         print("Error: GEMINI_API_KEY not set")
         return
@@ -41,7 +46,7 @@ def main():
     try:
         # Get the tree to give AI the 'map'
         docs_tree = run_command("find docs -maxdepth 5 -not -path '*/.*'")
-        
+
         # Get the diff to show what changed in code
         diff = run_command("git diff HEAD~1 HEAD -- 'src/**'")
         if not diff.strip():
@@ -53,7 +58,7 @@ def main():
 
     # 2. Configure Gemini with Tools
     client = genai.Client(api_key=api_key)
-    
+
     # We provide the read_doc_file function as a tool
     tools = [read_doc_file]
 
@@ -97,20 +102,37 @@ def main():
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=tools,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(disable=False)
-            )
+                automatic_function_calling=types.AutomaticFunctionCallingConfig(
+                    disable=False
+                ),
+            ),
         )
-        
-        content = response.text.strip()
+
+        raw_text = response.text
+        if raw_text is None:
+            print("Model returned no text (likely a function_call only). Raw response:")
+            for candidate in response.candidates or []:
+                for part in candidate.content.parts or []:
+                    if part.function_call:
+                        print(
+                            f"  function_call: {part.function_call.name}({dict(part.function_call.args or {})})"
+                        )
+                    if part.text:
+                        print(f"  text: {part.text[:200]}")
+            return
+
+        content = raw_text.strip()
         if content.startswith("```json"):
             content = content[7:]
         if content.endswith("```"):
             content = content[:-3]
-        
+
         data = json.loads(content.strip())
     except Exception as e:
         print(f"Agent failed to produce valid JSON: {e}")
-        print(f"Raw response: {response.text if 'response' in locals() else 'No response'}")
+        print(
+            f"Raw response: {response.text if 'response' in locals() else 'No response'}"
+        )
         return
 
     # 4. Apply changes
@@ -121,12 +143,15 @@ def main():
         print(f"Successfully processed: {path}")
 
     # 5. Export for GitHub Actions
-    if 'GITHUB_ENV' in os.environ:
-        with open(os.environ['GITHUB_ENV'], 'a') as f:
+    if "GITHUB_ENV" in os.environ:
+        with open(os.environ["GITHUB_ENV"], "a") as f:
             f.write(f"AI_PR_TITLE={data.get('pr_title', 'docs: automatic update')}\n")
             f.write("AI_PR_BODY<<EOF\n")
-            f.write(f"{data.get('pr_body', 'Documentation update triggered by code changes.')}\n")
+            f.write(
+                f"{data.get('pr_body', 'Documentation update triggered by code changes.')}\n"
+            )
             f.write("EOF\n")
+
 
 if __name__ == "__main__":
     main()
