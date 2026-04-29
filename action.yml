@@ -8,6 +8,10 @@ inputs:
     description: 'Gemini model to use'
     required: false
     default: 'gemini-1.5-pro'
+  prompt:
+    description: 'Custom system prompt for doc organization guidelines'
+    required: false
+    default: ''
 runs:
   using: 'composite'
   steps:
@@ -26,3 +30,4 @@ runs:
       env:
         GEMINI_API_KEY: ${{ inputs.gemini_api_key }}
         GEMINI_MODEL: ${{ inputs.gemini_model }}
+        DOCS_BOT_PROMPT: ${{ inputs.prompt }}
