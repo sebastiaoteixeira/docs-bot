@@ -93,33 +93,58 @@ def main():
     }}
     """
 
-    # 3. Generate Content with Automatic Function Calling
-    try:
-        print(f"Agent starting analysis using {model_name}...")
-        chat = client.chats.create(
+    TOOL_MAP = {"read_doc_file": read_doc_file}
+
+    def run_turn(contents):
+        response = client.models.generate_content(
             model=model_name,
+            contents=contents,
             config=types.GenerateContentConfig(
                 system_instruction=system_prompt,
                 tools=tools,
-                automatic_function_calling=types.AutomaticFunctionCallingConfig(
-                    disable=False
-                ),
             ),
         )
+        return response
 
-        response = chat.send_message(f"CODE DIFF:\n{diff}")
+    def execute_function_call(fc):
+        fn = TOOL_MAP.get(fc.name)
+        if fn is None:
+            return f"Error: unknown function {fc.name}"
+        args = dict(fc.args) if fc.args else {}
+        print(f"  Tool call: {fc.name}({args})")
+        return fn(**args)
+
+    try:
+        print(f"Agent starting analysis using {model_name}...")
+        contents = [f"CODE DIFF:\n{diff}"]
+
+        for _ in range(10):
+            response = run_turn(contents)
+
+            if response.text:
+                break
+
+            parts = response.candidates[0].content.parts
+            tool_call_parts = []
+            tool_response_parts = []
+
+            for part in parts:
+                if part.function_call:
+                    result = execute_function_call(part.function_call)
+                    tool_call_parts.append(part)
+                    tool_response_parts.append(
+                        types.Part.from_function_response(
+                            name=part.function_call.name,
+                            response={"result": result},
+                        )
+                    )
+
+            contents.append(types.Content(role="model", parts=tool_call_parts))
+            contents.append(types.Content(role="user", parts=tool_response_parts))
 
         raw_text = response.text
         if raw_text is None:
-            print("Model returned no text (likely a function_call only). Raw response:")
-            for candidate in response.candidates or []:
-                for part in candidate.content.parts or []:
-                    if part.function_call:
-                        print(
-                            f"  function_call: {part.function_call.name}({dict(part.function_call.args or {})})"
-                        )
-                    if part.text:
-                        print(f"  text: {part.text[:200]}")
+            print("Model returned no text after multi-turn loop.")
             return
 
         content = raw_text.strip()
